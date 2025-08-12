@@ -112,6 +112,49 @@ EOF
 echo "mysql -u ${DB_USER} -p${DB_PASSWORD} -h localhost -P ${DB_PORT} ${DB_NAME}" > db_connection.txt
 echo "Connection command saved to db_connection.txt"
 
+# Apply database migrations
+echo "Applying database migrations (if any)..."
+MIGRATIONS_DIR="$(dirname "$0")/migrations"
+
+# Ensure schema_migrations table exists
+sudo mysql --socket=/var/run/mysqld/mysqld.sock "${DB_NAME}" -e "
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  filename VARCHAR(255) NOT NULL UNIQUE,
+  applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+" 2>/dev/null
+
+if [ -d "${MIGRATIONS_DIR}" ]; then
+  # Sort and apply migrations not yet recorded
+  shopt -s nullglob
+  MIG_FILES=("${MIGRATIONS_DIR}"/[0-9][0-9][0-9][0-9]_*.sql)
+  if [ ${#MIG_FILES[@]} -eq 0 ]; then
+    echo "No migration files found."
+  else
+    for f in "${MIG_FILES[@]}"; do
+      base="$(basename "$f")"
+      applied_count=$(sudo mysql --socket=/var/run/mysqld/mysqld.sock -Nse "SELECT COUNT(*) FROM schema_migrations WHERE filename='${base}';" "${DB_NAME}" 2>/dev/null || echo "0")
+      if [ "${applied_count}" = "0" ]; then
+        echo "Applying migration: ${base}"
+        if sudo mysql --socket=/var/run/mysqld/mysqld.sock "${DB_NAME}" < "$f"; then
+          sudo mysql --socket=/var/run/mysqld/mysqld.sock "${DB_NAME}" -e "INSERT INTO schema_migrations (filename) VALUES ('${base}');"
+          echo "✓ Applied ${base}"
+        else
+          echo "✗ Failed to apply migration ${base}"
+          exit 1
+        fi
+      else
+        echo "Skipping already applied migration: ${base}"
+      fi
+    done
+  fi
+  shopt -u nullglob
+else
+  echo "Migrations directory not found at ${MIGRATIONS_DIR}; skipping migrations."
+fi
+
 # Save environment variables to a file
 cat > db_visualizer/mysql.env << EOF
 export MYSQL_URL="mysql://localhost:${DB_PORT}/${DB_NAME}"
